@@ -28,6 +28,13 @@ jobs:
             target: aarch64-unknown-linux-musl
             subpkg: linux-arm64
             zigbuild: true
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            subpkg: linux-x64-gnu
+          - runner: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            subpkg: linux-arm64-gnu
+            zigbuild: true
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
             subpkg: win32-x64

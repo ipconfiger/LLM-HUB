@@ -1,0 +1,19 @@
+{
+  "name": "@ipconfiger/llm-hub-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "Prebuilt binary for llm-hub (linux-x64). Install the main package instead.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ipconfiger/LLM-HUB.git"
+  },
+  "files": [
+    "bin/"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ]
+}

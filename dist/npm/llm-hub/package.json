@@ -30,7 +30,9 @@
     "@ipconfiger/llm-hub-darwin-arm64": "0.1.0",
     "@ipconfiger/llm-hub-darwin-x64": "0.1.0",
     "@ipconfiger/llm-hub-linux-x64": "0.1.0",
+    "@ipconfiger/llm-hub-linux-x64-gnu": "0.1.0",
     "@ipconfiger/llm-hub-linux-arm64": "0.1.0",
+    "@ipconfiger/llm-hub-linux-arm64-gnu": "0.1.0",
     "@ipconfiger/llm-hub-win32-x64": "0.1.0"
   },
   "engines": {

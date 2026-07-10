@@ -29,7 +29,12 @@ if (!subpkgKey) {
   process.exit(1);
 }
 
-const subpackage = `@ipconfiger/llm-hub-${subpkgKey}`;
+// LLM_HUB_VARIANT=gnu opts into the glibc-linked Linux binary (default is musl).
+const variant = (process.env.LLM_HUB_VARIANT || "").toLowerCase();
+let subpackage = `@ipconfiger/llm-hub-${subpkgKey}`;
+if (platform === "linux" && variant === "gnu") {
+  subpackage = `@ipconfiger/llm-hub-linux-${arch}-gnu`;
+}
 
 // Resolve the prebuilt binary for the current platform.
 //   1. try require.resolve (works when installed as a dependency / npm pkg)
