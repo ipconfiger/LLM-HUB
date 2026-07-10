@@ -1,0 +1,19 @@
+{
+  "name": "@ipconfiger/llm-hub-darwin-arm64",
+  "version": "0.1.0",
+  "description": "Prebuilt binary for llm-hub (darwin-arm64). Install the main package instead.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ipconfiger/LLM-HUB.git"
+  },
+  "files": [
+    "bin/"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ]
+}

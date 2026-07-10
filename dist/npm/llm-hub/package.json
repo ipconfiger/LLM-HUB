@@ -1,0 +1,39 @@
+{
+  "name": "@ipconfiger/llm-hub",
+  "version": "0.1.0",
+  "description": "A local LLM proxy that routes requests to multiple backends by model name.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ipconfiger/LLM-HUB.git"
+  },
+  "homepage": "https://github.com/ipconfiger/LLM-HUB",
+  "bugs": {
+    "url": "https://github.com/ipconfiger/LLM-HUB/issues"
+  },
+  "keywords": [
+    "llm",
+    "proxy",
+    "openai",
+    "gateway",
+    "ai",
+    "load-balancer",
+    "api-key"
+  ],
+  "bin": {
+    "llm-hub": "bin/cli.js"
+  },
+  "files": [
+    "bin/cli.js"
+  ],
+  "optionalDependencies": {
+    "@ipconfiger/llm-hub-darwin-arm64": "0.1.0",
+    "@ipconfiger/llm-hub-darwin-x64": "0.1.0",
+    "@ipconfiger/llm-hub-linux-x64": "0.1.0",
+    "@ipconfiger/llm-hub-linux-arm64": "0.1.0",
+    "@ipconfiger/llm-hub-win32-x64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

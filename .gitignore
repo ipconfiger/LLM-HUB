@@ -22,3 +22,10 @@ debug
 # Environment
 .env
 .env.*
+
+# npm prebuilt binaries (staged by scripts/pack-npm.mjs / CI)
+dist/npm/@ipconfiger/*/bin/
+
+# npm pack tarballs
+dist/npm/@ipconfiger/*.tgz
+dist/npm/llm-hub/*.tgz

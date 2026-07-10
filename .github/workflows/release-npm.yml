@@ -1,0 +1,179 @@
+name: Release npm
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-platform:
+    name: Build (${{ matrix.subpkg }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            subpkg: darwin-arm64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            subpkg: darwin-x64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            subpkg: linux-x64
+            zigbuild: true
+          - runner: ubuntu-22.04
+            target: aarch64-unknown-linux-musl
+            subpkg: linux-arm64
+            zigbuild: true
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            subpkg: win32-x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig (musl cross-compile)
+        if: matrix.zigbuild
+        uses: mlugg/setup-zig@v1
+
+      - name: Install cargo-zigbuild (musl cross-compile)
+        if: matrix.zigbuild
+        run: pip3 install cargo-zigbuild
+
+      - name: Build binary
+        env:
+          CARGO_TARGET_DIR: target
+        shell: bash
+        run: |
+          if [ "${{ matrix.zigbuild }}" = "true" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Set subpackage version from tag
+        shell: bash
+        env:
+          SUBPKG: ${{ matrix.subpkg }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e 'const fs=require("fs");const p=`dist/npm/@ipconfiger/llm-hub-${process.env.SUBPKG}/package.json`;const j=JSON.parse(fs.readFileSync(p,"utf8"));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+"\n");console.log("set",p,"->",process.argv[1]);' "$VERSION"
+
+      - name: Stage binary into subpackage
+        shell: bash
+        env:
+          SUBPKG: ${{ matrix.subpkg }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          BIN_NAME="llm-hub"
+          case "$SUBPKG" in
+            win32-*) BIN_NAME="llm-hub.exe" ;;
+          esac
+          mkdir -p "dist/npm/@ipconfiger/llm-hub-${SUBPKG}/bin"
+          cp "target/${TARGET}/release/${BIN_NAME}" \
+             "dist/npm/@ipconfiger/llm-hub-${SUBPKG}/bin/${BIN_NAME}"
+
+      - name: Pack subpackage tarball
+        shell: bash
+        working-directory: dist/npm/@ipconfiger
+        env:
+          SUBPKG: ${{ matrix.subpkg }}
+        run: |
+          npm pack "llm-hub-${SUBPKG}"
+          echo "SUBPKG=${SUBPKG}" >> "$GITHUB_ENV"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: subpkg-${{ matrix.subpkg }}
+          path: dist/npm/@ipconfiger/*.tgz
+          retention-days: 7
+
+  publish-main:
+    name: Publish main + subpackages
+    needs: [build-platform]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing version ${VERSION}"
+
+      - name: Bump version in all package.json
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Use Node to set version in every package.json under dist/npm
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const version = process.argv[1];
+            function walk(dir) {
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const p = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  walk(p);
+                } else if (entry.name === "package.json") {
+                  const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
+                  pkg.version = version;
+                  if (pkg.optionalDependencies) {
+                    for (const k of Object.keys(pkg.optionalDependencies)) {
+                      pkg.optionalDependencies[k] = version;
+                    }
+                  }
+                  fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n");
+                  console.log("bumped", p);
+                }
+              }
+            }
+            walk("dist/npm");
+          ' "$VERSION"
+
+      - name: Download all subpackage tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: subpkg-*
+          merge-multiple: true
+          path: dist/npm/@ipconfiger
+
+      - name: Publish subpackages
+        working-directory: dist/npm/@ipconfiger
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for f in *.tgz; do
+            echo "Publishing $f ..."
+            npm publish --access public "$f"
+          done
+
+      - name: Publish main package
+        working-directory: dist/npm/llm-hub
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/npm/@ipconfiger/*.tgz

@@ -30,6 +30,38 @@
 
 ## 快速开始
 
+### 安装
+
+**首选:npm 全局安装(推荐,免编译)**
+
+```bash
+npm install -g @ipconfiger/llm-hub
+llm-hub --serve
+```
+
+npm 会**自动只下载当前平台对应的预构建二进制**,装完即可用 `llm-hub` 命令。需要一个 Node.js 18+ 环境。
+
+**支持平台:**
+
+| 平台 | 架构 |
+| ---- | ---- |
+| macOS | arm64 (Apple Silicon)、x64 (Intel) |
+| Linux | x64、arm64(musl 静态,适合各类发行版 / 容器) |
+| Windows | x64 |
+
+> 若当前平台没有预构建版,启动器会给出提示,可改用源码编译(见下方"从源码构建")。
+
+#### 从源码构建(可选)
+
+```bash
+cargo build            # debug 版
+cargo build --release  # 优化版,推荐日常使用
+```
+
+二进制名即 `llm-hub`(release 版在 `target/release/llm-hub`)。若设了 `CARGO_TARGET_DIR`,去对应目录找二进制。
+
+---
+
 三步走:
 
 ```bash
