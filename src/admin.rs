@@ -5,13 +5,21 @@
 //! models) on the right. Edits are committed back to the config and saved to
 //! disk on demand or automatically on quit.
 //!
+//! A dedicated `f` key auto-fetches the selected backend's model list from its
+//! `/v1/models` (falling back to `/models`) endpoint and populates the
+//! `models` field. The fetch runs on a spawned task so the UI stays
+//! responsive while the request is in flight.
+//!
 //! The terminal is always restored on exit — even on error or panic — via an
 //! RAII [`TerminalGuard`] whose [`Drop`] impl calls [`ratatui::restore`].
 
 use crate::config::{Backend, Config};
 use crate::error::{self, Error};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+
+use futures_util::StreamExt;
+use tokio::sync::mpsc;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -36,27 +44,61 @@ impl Field {
     ];
 }
 
+/// Outcome of an in-flight model-list fetch, tagged with the backend index it
+/// was issued for so stale results can be discarded after navigation.
+type FetchOutcome = (usize, std::result::Result<Vec<String>, String>);
+
 /// Run the interactive configuration editor.
 ///
 /// Loads the config via [`Config::load`]. On quit, saves automatically if any
 /// unsaved changes exist. Returns `Ok(())` on a clean quit.
 ///
-/// The whole TUI runs on a [`tokio::task::spawn_blocking`] thread because
-/// crossterm's [`event::read`] is synchronous and blocking; this avoids
-/// stalling the async runtime.
+/// The event loop is fully async, driven by [`tokio::select!`] over crossterm's
+/// [`EventStream`] (terminal input) and an mpsc channel (fetch results). This
+/// keeps the UI responsive while HTTP fetches run on spawned tasks — unlike a
+/// blocking `read()`, an `EventStream` future can be polled concurrently.
 pub async fn run() -> error::Result<()> {
-    let join = tokio::task::spawn_blocking(|| -> error::Result<()> {
-        let mut terminal = ratatui::init();
-        // Restore the terminal no matter how we leave this closure.
-        let _guard = TerminalGuard;
-        let mut app = App::from_config(Config::load()?);
-        let result = app.run(&mut terminal);
-        // `_guard` drops here (before `terminal`) → `ratatui::restore()`.
-        result
-    });
+    let mut terminal = ratatui::init();
+    // Restore the terminal no matter how we leave this function.
+    let _guard = TerminalGuard;
 
-    join.await
-        .map_err(|err| Error::Other(format!("admin TUI task failed: {err}")))?
+    let mut app = App::from_config(Config::load()?);
+
+    // A shared HTTP client (rustls is the configured TLS backend). Cloning a
+    // `reqwest::Client` is cheap (it is `Arc` internally) and shares the
+    // connection pool across fetch tasks.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+
+    let (fetch_tx, mut fetch_rx) = mpsc::channel::<FetchOutcome>(8);
+    let mut events = EventStream::new();
+
+    loop {
+        terminal.draw(|frame| app.draw(frame))?;
+
+        tokio::select! {
+            // Terminal input (keys, resize, …).
+            maybe_ev = events.next() => match maybe_ev {
+                Some(Ok(ev)) => {
+                    if !app.handle_event(ev, &client, &fetch_tx) {
+                        break;
+                    }
+                }
+                // Propagate the I/O failure with context rather than bare.
+                Some(Err(e)) => {
+                    return Err(Error::Other(format!("terminal event stream error: {e}")));
+                }
+                None => break,
+            },
+            // A fetch task reported back.
+            Some(outcome) = fetch_rx.recv() => {
+                app.apply_fetch(outcome);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// RAII guard that restores the terminal on drop.
@@ -162,6 +204,8 @@ struct App {
     /// Snapshot of the backend as it was when editing started, used to detect
     /// whether a commit actually changed anything.
     snapshot: Option<Backend>,
+    /// Index of the backend a fetch is currently in flight for, if any.
+    pending_fetch_for: Option<usize>,
     /// Transient status message shown in the help bar.
     status: String,
     /// Set to true to break the event loop.
@@ -190,6 +234,7 @@ impl App {
             field: Field::NAME,
             edits: Default::default(),
             snapshot: None,
+            pending_fetch_for: None,
             status: String::new(),
             quit: false,
         };
@@ -214,35 +259,37 @@ impl App {
         }
     }
 
-    /// Synchronous main loop. Draws, then blocks for one key event, repeat.
-    fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> error::Result<()> {
-        while !self.quit {
-            terminal.draw(|frame| self.draw(frame))?;
-            let event = event::read()?;
-            self.handle_event(event);
-        }
-        Ok(())
-    }
-
-    fn handle_event(&mut self, event: Event) {
+    /// Dispatch one terminal event. Returns `false` to request a quit.
+    fn handle_event(
+        &mut self,
+        event: Event,
+        client: &reqwest::Client,
+        fetch_tx: &mpsc::Sender<FetchOutcome>,
+    ) -> bool {
         if let Event::Key(key) = event {
-            self.handle_key(key);
+            // Ctrl+C quits from anywhere.
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c'))
+            {
+                self.quit();
+                return false;
+            }
+            // 'f' = fetch models. Browse mode only: in edit mode 'f' must remain
+            // a normal character so that base_url / keys text containing 'f'
+            // (e.g. "https://api.siliconflow.cn") still types correctly.
+            if !self.editing && matches!(key.code, KeyCode::Char('f')) {
+                self.request_fetch(client, fetch_tx);
+                return true;
+            }
+            if self.editing {
+                self.handle_edit_key(key);
+            } else {
+                self.handle_browse_key(key);
+            }
         }
         // Resize / mouse / focus / paste events are ignored; the next redraw
         // handles them naturally.
-    }
-
-    fn handle_key(&mut self, key: KeyEvent) {
-        // Ctrl+C quits from anywhere.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-            self.quit();
-            return;
-        }
-        if self.editing {
-            self.handle_edit_key(key);
-        } else {
-            self.handle_browse_key(key);
-        }
+        !self.quit
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) {
@@ -396,6 +443,99 @@ impl App {
             }
         }
         self.quit = true;
+    }
+
+    /// Kick off a model-list fetch for the selected backend (browse mode).
+    ///
+    /// Requires a non-empty `base_url` and at least one non-empty key; otherwise
+    /// shows a hint and does nothing. The actual HTTP work happens on a spawned
+    /// task so the UI keeps redrawing.
+    fn request_fetch(&mut self, client: &reqwest::Client, fetch_tx: &mpsc::Sender<FetchOutcome>) {
+        let backend_index = self.selected;
+
+        // Extract owned copies so the borrow of `self.config` ends before we
+        // mutate `self.status` / `self.pending_fetch_for` below.
+        let (base, first_key) = match self.config.backends.get(backend_index) {
+            Some(b) => {
+                let base = b.base_url.trim().trim_end_matches('/').to_string();
+                let first_key = b
+                    .keys
+                    .iter()
+                    .map(|k| k.trim())
+                    .find(|k| !k.is_empty())
+                    .map(str::to_string);
+                (base, first_key)
+            }
+            None => (String::new(), None),
+        };
+
+        if base.is_empty() {
+            self.status = "请先填写 base_url 和 key".to_string();
+            return;
+        }
+        let Some(key) = first_key else {
+            self.status = "请先填写 base_url 和 key".to_string();
+            return;
+        };
+
+        let client = client.clone();
+        let tx = fetch_tx.clone();
+        self.status = "正在获取模型列表…".to_string();
+        self.pending_fetch_for = Some(backend_index);
+        tokio::spawn(async move {
+            let res = fetch_model_list(&client, &base, &key).await;
+            // Sending can only fail if the receiver was dropped (app exited),
+            // in which case there is nothing useful to do.
+            let _ = tx.send((backend_index, res)).await;
+        });
+    }
+
+    /// Apply a completed fetch outcome, if still relevant.
+    ///
+    /// Stale results (user navigated away, or the fetch was superseded) are
+    /// discarded. On failure the existing model list is left untouched.
+    fn apply_fetch(&mut self, outcome: FetchOutcome) {
+        let (idx, res) = outcome;
+
+        // Only honor this if it is still the pending fetch for that backend.
+        if self.pending_fetch_for.take() != Some(idx) {
+            return;
+        }
+        // Ignore if the user navigated away from the fetched backend.
+        if idx != self.selected {
+            return;
+        }
+
+        match res {
+            Ok(models) => {
+                let count = models.len();
+                // Write straight into the backend (source of truth) so the
+                // result survives even a quit-without-commit while editing.
+                if let Some(b) = self.config.backends.get_mut(idx) {
+                    b.models = models;
+                }
+                if self.editing {
+                    // Reflect it in the live editor buffer too.
+                    let csv = self
+                        .config
+                        .backends
+                        .get(idx)
+                        .map_or(String::new(), |b| to_csv(&b.models));
+                    self.edits[Field::MODELS] = Editor::from_str(&csv);
+                } else {
+                    self.sync_edits();
+                }
+                self.dirty = true;
+                self.status = if count == 0 {
+                    "未获取到模型（响应中无 data.id）".to_string()
+                } else {
+                    format!("已获取 {count} 个模型")
+                };
+            }
+            Err(reason) => {
+                self.status = format!("获取失败: {reason}");
+            }
+        }
     }
 
     // ----- rendering -------------------------------------------------------
@@ -553,7 +693,7 @@ impl App {
         let hint = if self.editing {
             " Esc/Enter 提交  Tab/↑↓ 切换字段  ←→ Home/End 移动光标  Backspace/Delete 删除"
         } else {
-            " ↑↓ 选择后端  Enter 编辑字段  a 新增  d 删除  s 保存  q 退出"
+            " ↑↓ 选择后端  Enter 编辑字段  a 新增  d 删除  s 保存  f 获取模型  q 退出"
         };
         let status = if self.status.is_empty() {
             String::new()
@@ -612,4 +752,206 @@ fn is_wide(c: char) -> bool {
         | 0x1F300..=0x1FAFF
         | 0x20000..=0x3FFFD
     )
+}
+
+// ----- model-list fetching -----------------------------------------------
+
+/// Parse an OpenAI-style `/v1/models` JSON body into the list of model ids.
+///
+/// Accepts a JSON object of the shape `{"data":[{"id":"..."}, ...]}`. Ids are
+/// collected in order, de-duplicated (first occurrence kept), and empty ids are
+/// dropped. Any malformed JSON, missing `data`, or non-array `data` yields an
+/// empty `Vec` (never an error).
+fn parse_model_ids(body: &str) -> Vec<String> {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let Some(data) = value.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in data {
+        let Some(id) = item.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let owned = id.to_string();
+        if seen.insert(owned.clone()) {
+            out.push(owned);
+        }
+    }
+    out
+}
+
+/// Fetch the model list for a backend.
+///
+/// Tries `{base_url}/v1/models` first, falling back to `{base_url}/models` if
+/// the first attempt fails (transport error or non-2xx status). The first 2xx
+/// response is parsed with [`parse_model_ids`] and returned — including an
+/// empty list if the body contained no `data.id` entries. If both URLs fail,
+/// returns `Err` carrying a short, human-readable reason.
+async fn fetch_model_list(
+    client: &reqwest::Client,
+    base_url: &str,
+    key: &str,
+) -> std::result::Result<Vec<String>, String> {
+    let base = base_url.trim_end_matches('/');
+    let mut last_reason = String::from("两个端点均不可用");
+
+    for path in ["/v1/models", "/models"] {
+        let url = format!("{base}{path}");
+        match client.get(&url).bearer_auth(key).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.text().await {
+                Ok(body) => return Ok(parse_model_ids(&body)),
+                Err(e) => {
+                    tracing::warn!("models body read failed for {url}: {e}");
+                    last_reason = e.to_string();
+                }
+            },
+            Ok(resp) => {
+                tracing::debug!("models request {url} -> HTTP {}", resp.status());
+                last_reason = format!("HTTP {}", resp.status());
+            }
+            Err(e) => {
+                tracing::debug!("models request {url} failed: {e}");
+                last_reason = e.to_string();
+            }
+        }
+    }
+
+    Err(last_reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn parse_model_ids_dedupes_and_drops_empty() {
+        let body = r#"{"object":"list","data":[{"id":"gpt-4o"},{"id":"gpt-4o"},{"id":""},{"id":"text-embedding-3-small"}]}"#;
+        let ids = parse_model_ids(body);
+        assert_eq!(
+            ids,
+            vec!["gpt-4o".to_string(), "text-embedding-3-small".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_model_ids_malformed_json_is_empty() {
+        assert_eq!(parse_model_ids("not json"), Vec::<String>::new());
+        assert_eq!(parse_model_ids("{ broken"), Vec::<String>::new());
+        assert_eq!(parse_model_ids(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_model_ids_missing_data_is_empty() {
+        assert_eq!(parse_model_ids(r#"{"object":"list"}"#), Vec::<String>::new());
+        assert_eq!(
+            parse_model_ids(r#"{"data":"not-an-array"}"#),
+            Vec::<String>::new()
+        );
+        assert_eq!(parse_model_ids(r#"{"data":[]}"#), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_model_ids_keeps_first_occurrence_order() {
+        let body = r#"{"data":[{"id":"b"},{"id":"a"},{"id":"b"},{"id":"c"},{"id":"a"}]}"#;
+        assert_eq!(
+            parse_model_ids(body),
+            vec!["b".to_string(), "a".to_string(), "c".to_string()]
+        );
+    }
+
+    /// Spawn a tiny single-threaded HTTP server on a free port. For each
+    /// connection it reads the request line and replies 200 + `body` when the
+    /// path equals `ok_path`, otherwise 404. Returns the base URL.
+    fn spawn_mock(ok_path: &str, body: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ok_path = ok_path.to_string();
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            // Serve a few connections so the fallback path works.
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { continue };
+                // Read until the end of the request headers.
+                let mut buf = [0u8; 1024];
+                let mut req = Vec::new();
+                loop {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 || req.len() > 8192 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let req_text = String::from_utf8_lossy(&req);
+                let path = req_text
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let resp = if path == ok_path {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                };
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn fetch_model_list_succeeds_on_v1_models() {
+        let body =
+            r#"{"object":"list","data":[{"id":"gpt-4o"},{"id":"claude-3-5-sonnet"}]}"#;
+        let base = spawn_mock("/v1/models", body);
+        let client = reqwest::Client::new();
+        let res = fetch_model_list(&client, &base, "test-key").await;
+        assert!(res.is_ok(), "expected Ok, got {:?}", res);
+        assert_eq!(
+            res.unwrap(),
+            vec!["gpt-4o".to_string(), "claude-3-5-sonnet".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_model_list_falls_back_to_models() {
+        // /v1/models is not the `ok_path`, so it 404s; /models returns the JSON.
+        let body = r#"{"data":[{"id":"llama-3.1-70b"},{"id":"qwen2.5-72b"}]}"#;
+        let base = spawn_mock("/models", body);
+        let client = reqwest::Client::new();
+        let res = fetch_model_list(&client, &base, "k").await;
+        assert!(res.is_ok(), "expected Ok, got {:?}", res);
+        assert_eq!(
+            res.unwrap(),
+            vec!["llama-3.1-70b".to_string(), "qwen2.5-72b".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_model_list_both_fail_is_err() {
+        // Neither path matches → both 404.
+        let base = spawn_mock("/never", "{}");
+        let client = reqwest::Client::new();
+        let res = fetch_model_list(&client, &base, "k").await;
+        assert!(res.is_err(), "expected Err, got {:?}", res);
+        assert!(res.unwrap_err().contains("HTTP"), "reason should mention HTTP");
+    }
 }
