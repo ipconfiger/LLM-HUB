@@ -1,6 +1,6 @@
 # llm-hub
 
-A local LLM proxy that routes requests to multiple OpenAI-compatible backends by **model name**. Point any agent/tool at a single local URL and `llm-hub` forwards each request to the right backend, with automatic failover and round-robin key load balancing.
+A local LLM proxy that routes requests to multiple OpenAI-compatible backends by **model name**. Point any agent/tool at a single local URL and `llm-hub` forwards each request to the right backend, with **sticky key usage**, automatic failover, and distinct handling of *key-exhausted* vs *backend-unreachable* errors.
 
 - **One URL for everything** — agents use `http://127.0.0.1:3000/v1` as their base URL.
 - **Model-based routing** — the `model` field in the request body selects the backend(s).
@@ -90,16 +90,24 @@ Format:
 | ---------- | -------------- | ------------------------------------------------------------------ |
 | `name`     | string         | Human-readable label shown in logs and the TUI.                     |
 | `base_url` | string         | Base URL of the OpenAI-compatible API (no trailing slash needed).  |
-| `keys`     | array<string>  | One or more API keys; rotated per request and used for failover.   |
+| `keys`     | array<string>  | One or more API keys. Used stickily (one is preferred until it's exhausted), with failover across the rest. |
 | `models`   | array<string>  | Model names served by this backend (matched against request `model`). |
 
 ## How routing & failover work
 
 1. A request arrives at `POST /v1/<path>` (e.g. `/v1/chat/completions`).
 2. `llm-hub` reads the `model` field from the request body.
-3. It resolves the ordered list of candidate endpoints: every backend whose `models` contains that model, in configuration order. For each backend, **one entry per non-empty key** is produced, with the key list **rotated by a round-robin counter** so the first key tried advances on each request (load balancing across keys).
-4. Candidates are tried in order. If a candidate fails to connect or returns a **non-2xx status** *before* any bytes are streamed, the next candidate is tried (failover). Once a candidate starts streaming a `2xx` response, the proxy commits to it and streams the body through to the agent (mid-stream errors end the stream).
-5. If no candidate succeeds, the agent receives `502` with an error message.
+3. It resolves the candidate backends: every backend whose `models` contains that model, in configuration order. Backends currently parked (see below) are skipped unless all of them are parked, in which case they're retried as a last resort. Within a backend, the **preferred (sticky) key** is tried first.
+4. Each upstream attempt is **classified** into one of:
+   - **Success** (`2xx`) — the response is streamed through to the agent byte-for-byte. The proxy then commits to this backend/key.
+   - **Key exhausted** (`401`, `402`, `403`, `429` — auth/quota/rate-limit) — that key is **parked for 60s** and the **next key of the same backend** is tried. When a key succeeds, it becomes the new sticky key.
+   - **Backend unreachable** (transport failure, or `5xx`) — the **whole backend** is **parked for 10s** and the proxy **skips its remaining keys**, jumping to the next backend.
+   - **Client error** (any other `4xx`, e.g. `400`/`404`/`422`) — the request itself is rejected; the status and body are **propagated to the agent verbatim** and no retry happens.
+5. Failover order: exhaust a backend's keys (on key-exhausted) → next backend; on backend-unreachable → next backend immediately. If every backend is exhausted/unreachable, the agent receives `502` with the per-backend reasons.
+
+Once a candidate starts streaming a `2xx` response, the proxy is committed to it; mid-stream errors simply end the stream.
+
+Parked keys/backends automatically re-enter the pool when their cooldown elapses, so transient rate limits and outages recover without a restart.
 
 Endpoints:
 
@@ -120,7 +128,7 @@ Agent ──HTTP──► Axum handler ──MPSC(job)──► worker task
 ```
 
 - **`main.rs`** — clap CLI (`--serve` / `--admin` / `--bind` / `--init`), logging init, dispatch.
-- **`config.rs`** — `Config` / `Backend` structs, load/save, and the `Resolver` (round-robin key load balancing + model→backend resolution).
+- **`config.rs`** — `Config` / `Backend` structs, load/save, and the `Resolver` (model→backend resolution + sticky key/health state with cooldowns).
 - **`worker.rs`** — MPSC worker: receives `ProxyJob`s, runs each in its own task.
 - **`proxy.rs`** — the upstream try-loop (ordered failover, streaming).
 - **`server.rs`** — Axum `Router`, handlers, `serve()`.

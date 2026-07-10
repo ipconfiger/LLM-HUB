@@ -30,7 +30,8 @@ pub struct AppState {
     /// Sender half of the proxy job queue consumed by the worker. The worker
     /// itself owns the shared reqwest client used to talk to upstream backends.
     pub worker_tx: mpsc::Sender<ProxyJob>,
-    /// Round-robin resolver over the loaded configuration, shared with the worker.
+    /// Sticky-key resolver + health tracker over the loaded configuration,
+    /// shared with the worker.
     pub resolver: Arc<config::Resolver>,
 }
 
