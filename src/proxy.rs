@@ -6,7 +6,7 @@
 //! emitted the handler is committed to that backend and the upstream body is
 //! streamed until it ends or errors.
 
-use crate::config::Config;
+use crate::config::Resolver;
 use crate::worker::{ProxyEvent, ProxyJob};
 use futures_util::StreamExt;
 
@@ -16,12 +16,12 @@ const DEFAULT_CONTENT_TYPE: &str = "text/event-stream";
 /// Run a single proxy job to completion.
 ///
 /// Resolves the job's model to an ordered list of backends via
-/// [`Config::resolve`] and tries each in turn. On a 2xx response the upstream
+/// [`Resolver::resolve`] and tries each in turn. On a 2xx response the upstream
 /// body is streamed back over `job.response_tx`; on a connect error or
 /// non-2xx status the next backend is attempted. If no backend succeeds a
 /// single [`ProxyEvent::Failed`] is emitted, joining all per-backend reasons.
-pub async fn run(job: ProxyJob, client: &reqwest::Client, config: &Config) {
-    let resolved = config.resolve(&job.model);
+pub async fn run(job: ProxyJob, client: &reqwest::Client, resolver: &Resolver) {
+    let resolved = resolver.resolve(&job.model);
     tracing::info!(
         model = %job.model,
         backends = resolved.len(),

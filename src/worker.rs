@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::config::Config;
+use crate::config::Resolver;
 use crate::proxy;
 
 /// A single unit of proxy work, enqueued by the HTTP handler and consumed by
@@ -46,29 +46,29 @@ pub enum ProxyEvent {
 
 /// Spawn the proxy worker.
 ///
-/// The worker owns `client` and `config`, receiving [`ProxyJob`]s from `rx`.
+/// The worker owns `client` and `resolver`, receiving [`ProxyJob`]s from `rx`.
 /// Each job is dispatched to a fresh [`tokio::task`] (cloning the shared client
-/// and config) so concurrent requests are handled in parallel rather than
+/// and resolver) so concurrent requests are handled in parallel rather than
 /// serialized behind the queue.
 ///
 /// Returns a [`JoinHandle`] for the worker's driver task.
 pub fn spawn(
     client: reqwest::Client,
-    config: Arc<Config>,
+    resolver: Arc<Resolver>,
     mut rx: mpsc::Receiver<ProxyJob>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("proxy worker started");
         while let Some(job) = rx.recv().await {
             let client = client.clone();
-            let config = config.clone();
+            let resolver = resolver.clone();
             tokio::spawn(async move {
                 tracing::info!(
                     model = %job.model,
                     path = %job.path,
                     "dispatching proxy job"
                 );
-                proxy::run(job, &client, &config).await;
+                proxy::run(job, &client, &resolver).await;
             });
         }
         tracing::info!("proxy worker stopped (job channel closed)");

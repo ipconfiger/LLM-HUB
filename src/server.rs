@@ -30,8 +30,8 @@ pub struct AppState {
     /// Sender half of the proxy job queue consumed by the worker. The worker
     /// itself owns the shared reqwest client used to talk to upstream backends.
     pub worker_tx: mpsc::Sender<ProxyJob>,
-    /// Loaded configuration, shared with the worker.
-    pub config: Arc<config::Config>,
+    /// Round-robin resolver over the loaded configuration, shared with the worker.
+    pub resolver: Arc<config::Resolver>,
 }
 
 /// Start the llm-hub HTTP server bound to `addr`.
@@ -41,17 +41,18 @@ pub struct AppState {
 pub async fn serve(addr: std::net::SocketAddr) -> error::Result<()> {
     let config = config::Config::load()?;
     let config = Arc::new(config);
+    let resolver = Arc::new(config::Resolver::new(config.clone()));
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
     let (worker_tx, worker_rx) = mpsc::channel::<ProxyJob>(128);
-    let _worker = worker::spawn(client.clone(), config.clone(), worker_rx);
+    let _worker = worker::spawn(client.clone(), resolver.clone(), worker_rx);
 
     let state = AppState {
         worker_tx,
-        config,
+        resolver,
     };
 
     let app = build_router(state);
@@ -165,7 +166,7 @@ async fn translate_response(mut response_rx: mpsc::Receiver<ProxyEvent>) -> Resp
 async fn models(State(state): State<AppState>) -> impl IntoResponse {
     let mut seen = std::collections::HashSet::new();
     let mut data = Vec::new();
-    for backend in &state.config.backends {
+    for backend in &state.resolver.config().backends {
         for model in &backend.models {
             if seen.insert(model.clone()) {
                 data.push(serde_json::json!({
@@ -213,10 +214,10 @@ mod tests {
 
     fn dummy_state() -> AppState {
         let (tx, _rx) = mpsc::channel::<ProxyJob>(8);
-        let config = Arc::new(config::Config::default());
+        let resolver = Arc::new(config::Resolver::new(Arc::new(config::Config::default())));
         AppState {
             worker_tx: tx,
-            config,
+            resolver,
         }
     }
 

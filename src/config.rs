@@ -5,6 +5,8 @@
 //! on macOS — see [`dirs::config_dir`]).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,35 +49,6 @@ pub struct ResolvedBackend {
 }
 
 impl Config {
-    /// Resolve the ordered list of concrete endpoints capable of serving
-    /// `model`.
-    ///
-    /// Backends are iterated in configuration order; for each backend that
-    /// lists `model`, one [`ResolvedBackend`] per non-empty key is produced
-    /// (keys iterated in order). The resulting order is the failover order
-    /// used by the proxy.
-    pub fn resolve(&self, model: &str) -> Vec<ResolvedBackend> {
-        let mut out = Vec::new();
-        for b in &self.backends {
-            let serves = b.models.iter().any(|m| m == model);
-            if !serves {
-                continue;
-            }
-            let base_url = b.base_url.trim_end_matches('/').to_owned();
-            for key in &b.keys {
-                if key.trim().is_empty() {
-                    continue;
-                }
-                out.push(ResolvedBackend {
-                    backend_name: b.name.clone(),
-                    base_url: base_url.clone(),
-                    key: key.clone(),
-                });
-            }
-        }
-        out
-    }
-
     /// Load the config from the default path. Returns a default (empty) config
     /// when the file does not exist yet, rather than an error.
     pub fn load() -> Result<Self> {
@@ -123,5 +96,62 @@ impl Config {
                 models: vec!["Qwen/Qwen3-32B".into(), "deepseek-ai/DeepSeek-V3".into()],
             }],
         }
+    }
+}
+
+/// Round-robin load balancer + model resolver, shared across requests via `Arc`.
+///
+/// Each backend owns a monotonically increasing counter; for every request the
+/// backend's key list is rotated by its counter so the starting key advances
+/// (round-robin load balancing). All keys of each backend remain available for
+/// failover within a single request, in rotated order.
+pub struct Resolver {
+    config: Arc<Config>,
+    counters: Vec<AtomicUsize>,
+}
+
+impl Resolver {
+    /// Build a resolver sharing the given config. One atomic counter per backend
+    /// (indexed identically to `config.backends`).
+    pub fn new(config: Arc<Config>) -> Self {
+        let counters = (0..config.backends.len())
+            .map(|_| AtomicUsize::new(0))
+            .collect();
+        Self { config, counters }
+    }
+
+    /// Borrow the underlying config (used e.g. by `/v1/models`).
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Resolve the ordered failover list for `model`.
+    ///
+    /// Iterates backends in configuration order; for each backend that lists
+    /// `model`, emits one [`ResolvedBackend`] per non-empty key, with the key list
+    /// rotated by that backend's counter (so the first key changes each call).
+    /// Backends with no non-empty key are skipped.
+    pub fn resolve(&self, model: &str) -> Vec<ResolvedBackend> {
+        let mut out = Vec::new();
+        for (i, b) in self.config.backends.iter().enumerate() {
+            if !b.models.iter().any(|m| m == model) {
+                continue;
+            }
+            let keys: Vec<&String> = b.keys.iter().filter(|k| !k.trim().is_empty()).collect();
+            if keys.is_empty() {
+                continue;
+            }
+            let base_url = b.base_url.trim_end_matches('/').to_owned();
+            let start = self.counters[i].fetch_add(1, Ordering::Relaxed);
+            for j in 0..keys.len() {
+                let key = keys[(start + j) % keys.len()];
+                out.push(ResolvedBackend {
+                    backend_name: b.name.clone(),
+                    base_url: base_url.clone(),
+                    key: key.clone(),
+                });
+            }
+        }
+        out
     }
 }
