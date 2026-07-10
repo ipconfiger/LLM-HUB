@@ -82,9 +82,11 @@ impl Config {
 
     /// Save the config to the default path, creating parent directories.
     pub fn save(&self) -> Result<()> {
-        let path = Self::path().ok_or_else(|| Error::Config(
-            "could not determine the configuration directory for this platform".into(),
-        ))?;
+        let path = Self::path().ok_or_else(|| {
+            Error::Config(
+                "could not determine the configuration directory for this platform".into(),
+            )
+        })?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -247,12 +249,7 @@ impl Resolver {
                 order.collect()
             } else {
                 order
-                    .filter(|&k| {
-                        bs.keys[k]
-                            .exhausted_until
-                            .map(|t| t <= now)
-                            .unwrap_or(true)
-                    })
+                    .filter(|&k| bs.keys[k].exhausted_until.map(|t| t <= now).unwrap_or(true))
                     .collect()
             };
             if picked.is_empty() {
@@ -268,7 +265,10 @@ impl Resolver {
             out.push(ResolvedBackend {
                 backend_index: i,
                 backend_name: self.config.backends[i].name.clone(),
-                base_url: self.config.backends[i].base_url.trim_end_matches('/').to_owned(),
+                base_url: self.config.backends[i]
+                    .base_url
+                    .trim_end_matches('/')
+                    .to_owned(),
                 keys,
             });
         }

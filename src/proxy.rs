@@ -59,12 +59,7 @@ enum Attempt {
 }
 
 /// Perform one upstream attempt and classify its outcome.
-async fn attempt(
-    client: &reqwest::Client,
-    url: &str,
-    key: &str,
-    body: bytes::Bytes,
-) -> Attempt {
+async fn attempt(client: &reqwest::Client, url: &str, key: &str, body: bytes::Bytes) -> Attempt {
     let resp = match client
         .post(url)
         .header("Authorization", format!("Bearer {}", key))
@@ -165,9 +160,7 @@ pub async fn run(job: ProxyJob, client: &reqwest::Client, resolver: &Resolver) {
                                     .await
                                     .is_err()
                                 {
-                                    tracing::debug!(
-                                        "client disconnected mid-stream; aborting job"
-                                    );
+                                    tracing::debug!("client disconnected mid-stream; aborting job");
                                     return;
                                 }
                             }

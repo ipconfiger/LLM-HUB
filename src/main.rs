@@ -45,7 +45,9 @@ struct Cli {
 fn main() -> ExitCode {
     // Initialize structured logging. Respect RUST_LOG if set, default to "info".
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let cli = Cli::parse();

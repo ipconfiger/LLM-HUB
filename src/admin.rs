@@ -36,12 +36,8 @@ impl Field {
     const MODELS: usize = 3;
     const N: usize = 4;
     /// Human-facing labels for the four editable fields.
-    const LABELS: [&'static str; Self::N] = [
-        "name",
-        "base_url",
-        "keys  (逗号分隔)",
-        "models  (逗号分隔)",
-    ];
+    const LABELS: [&'static str; Self::N] =
+        ["name", "base_url", "keys  (逗号分隔)", "models  (逗号分隔)"];
 }
 
 /// Outcome of an in-flight model-list fetch, tagged with the backend index it
@@ -114,20 +110,11 @@ impl Drop for TerminalGuard {
 }
 
 /// A single-line, Unicode-safe text editor with a char-based cursor.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Editor {
     text: String,
     /// Cursor position as a count of `char`s from the start.
     cursor: usize,
-}
-
-impl Default for Editor {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            cursor: 0,
-        }
-    }
 }
 
 impl Editor {
@@ -369,7 +356,7 @@ impl App {
         let changed = self
             .snapshot
             .as_ref()
-            .map_or(true, |old| !backend_eq(old, &new_backend));
+            .is_none_or(|old| !backend_eq(old, &new_backend));
 
         if changed {
             if let Some(slot) = self.config.backends.get_mut(self.selected) {
@@ -437,10 +424,8 @@ impl App {
 
     fn quit(&mut self) {
         // Auto-save on quit if there are unsaved changes.
-        if self.dirty {
-            if self.config.save().is_ok() {
-                self.dirty = false;
-            }
+        if self.dirty && self.config.save().is_ok() {
+            self.dirty = false;
         }
         self.quit = true;
     }
@@ -621,7 +606,9 @@ impl App {
     }
 
     fn draw_editor(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default().borders(Borders::ALL).title("字段编辑  (Editor)");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("字段编辑  (Editor)");
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -852,7 +839,10 @@ mod tests {
 
     #[test]
     fn parse_model_ids_missing_data_is_empty() {
-        assert_eq!(parse_model_ids(r#"{"object":"list"}"#), Vec::<String>::new());
+        assert_eq!(
+            parse_model_ids(r#"{"object":"list"}"#),
+            Vec::<String>::new()
+        );
         assert_eq!(
             parse_model_ids(r#"{"data":"not-an-array"}"#),
             Vec::<String>::new()
@@ -919,8 +909,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_model_list_succeeds_on_v1_models() {
-        let body =
-            r#"{"object":"list","data":[{"id":"gpt-4o"},{"id":"claude-3-5-sonnet"}]}"#;
+        let body = r#"{"object":"list","data":[{"id":"gpt-4o"},{"id":"claude-3-5-sonnet"}]}"#;
         let base = spawn_mock("/v1/models", body);
         let client = reqwest::Client::new();
         let res = fetch_model_list(&client, &base, "test-key").await;
@@ -952,6 +941,9 @@ mod tests {
         let client = reqwest::Client::new();
         let res = fetch_model_list(&client, &base, "k").await;
         assert!(res.is_err(), "expected Err, got {:?}", res);
-        assert!(res.unwrap_err().contains("HTTP"), "reason should mention HTTP");
+        assert!(
+            res.unwrap_err().contains("HTTP"),
+            "reason should mention HTTP"
+        );
     }
 }
