@@ -23,9 +23,9 @@ debug
 .env
 .env.*
 
-# npm prebuilt binaries (staged by scripts/pack-npm.mjs / CI)
-dist/npm/@ipconfiger/*/bin/
+# npm downloaded/staged binary (postinstall or scripts/pack-npm.mjs)
+dist/npm/llm-hub/bin/llm-hub
+dist/npm/llm-hub/bin/llm-hub.exe
 
 # npm pack tarballs
-dist/npm/@ipconfiger/*.tgz
 dist/npm/llm-hub/*.tgz

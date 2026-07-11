@@ -9,21 +9,27 @@ npm install -g @ipconfiger/llm-hub
 llm-hub --serve
 ```
 
-This package ships a small Node.js launcher that automatically selects the
-correct prebuilt binary for your platform. npm downloads **only** the binary
-matching your OS/architecture.
+At install time a `postinstall` script automatically downloads the correct
+prebuilt binary for your platform from [GitHub Releases](https://github.com/ipconfiger/LLM-HUB/releases).
 
 ### Supported platforms
 
 | OS      | Architecture |
 | ------- | ------------ |
 | macOS   | arm64 (Apple Silicon), x64 (Intel) |
-| Linux   | x64, arm64 (musl static)           |
-| Windows | x64                                |
+| Linux   | x64, arm64 (musl static default; set `LLM_HUB_VARIANT=gnu` for glibc) |
+| Windows | x64 |
+
+### Environment variables
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `LLM_HUB_VARIANT` | _(unset)_ | Set to `gnu` on Linux to download the glibc-linked binary instead of musl. |
+| `LLM_HUB_FORCE_DOWNLOAD` | _(unset)_ | Set to `1` to force re-download even if the binary already exists. |
 
 ### Requirements
 
-- Node.js 18+ (only needed for the launcher; the binary itself is standalone)
+- Node.js 18+ (only for install/download; the binary itself is standalone)
 - If your platform has no prebuilt binary, build from source:
   [LLM-HUB](https://github.com/ipconfiger/LLM-HUB)
 

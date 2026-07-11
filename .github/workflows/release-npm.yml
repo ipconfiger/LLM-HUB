@@ -3,41 +3,48 @@ name: Release npm
 on:
   push:
     tags:
-      - "v*"
+      - "v*.*.*"
   workflow_dispatch:
 
+permissions:
+  contents: write
+  id-token: write
+
 jobs:
-  build-platform:
-    name: Build (${{ matrix.subpkg }})
+  build:
+    name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_TARGET_DIR: target
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: macos-14
             target: aarch64-apple-darwin
-            subpkg: darwin-arm64
+            asset: llm-hub-darwin-arm64
           - runner: macos-14
             target: x86_64-apple-darwin
-            subpkg: darwin-x64
+            asset: llm-hub-darwin-x64
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-musl
-            subpkg: linux-x64
-            zigbuild: true
+            asset: llm-hub-linux-x64
+            use_cross: true
           - runner: ubuntu-22.04
             target: aarch64-unknown-linux-musl
-            subpkg: linux-arm64
-            zigbuild: true
+            asset: llm-hub-linux-arm64
+            use_cross: true
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            subpkg: linux-x64-gnu
+            asset: llm-hub-linux-x64-gnu
+            use_cross: true
           - runner: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
-            subpkg: linux-arm64-gnu
-            zigbuild: true
+            asset: llm-hub-linux-arm64-gnu
+            use_cross: true
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
-            subpkg: win32-x64
+            asset: llm-hub-win32-x64.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,137 +54,85 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Cross-compile the non-native targets (musl x64/arm64, gnu arm64) with
-      # `cross` (Docker images from GitHub's own registry) instead of zig — the
-      # zig download mirror was flaky (503 outages), breaking releases.
       - name: Install cross (cross-compile)
-        if: matrix.zigbuild
+        if: matrix.use_cross
         run: cargo install --locked cross
 
       - name: Build binary
         shell: bash
         run: |
-          if [ "${{ matrix.zigbuild }}" = "true" ]; then
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
           fi
 
-      - name: Set subpackage version from tag
+      - name: Strip binary (unix only)
+        if: runner.os != 'Windows'
         shell: bash
-        env:
-          SUBPKG: ${{ matrix.subpkg }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          node -e 'const fs=require("fs");const p=`dist/npm/@ipconfiger/llm-hub-${process.env.SUBPKG}/package.json`;const j=JSON.parse(fs.readFileSync(p,"utf8"));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+"\n");console.log("set",p,"->",process.argv[1]);' "$VERSION"
+          BIN="target/${{ matrix.target }}/release/llm-hub"
+          [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
+          strip "${BIN}" || true
 
-      - name: Stage binary into subpackage
+      - name: Stage binary for upload
         shell: bash
-        env:
-          SUBPKG: ${{ matrix.subpkg }}
-          TARGET: ${{ matrix.target }}
         run: |
-          BIN_NAME="llm-hub"
-          case "$SUBPKG" in
-            win32-*) BIN_NAME="llm-hub.exe" ;;
-          esac
-          mkdir -p "dist/npm/@ipconfiger/llm-hub-${SUBPKG}/bin"
-          cp "target/${TARGET}/release/${BIN_NAME}" \
-             "dist/npm/@ipconfiger/llm-hub-${SUBPKG}/bin/${BIN_NAME}"
+          SRC="target/${{ matrix.target }}/release/llm-hub"
+          [ -f "${SRC}.exe" ] && SRC="${SRC}.exe"
+          cp "${SRC}" "${{ matrix.asset }}"
 
-      - name: Pack subpackage tarball
-        shell: bash
-        working-directory: dist/npm/@ipconfiger
-        env:
-          SUBPKG: ${{ matrix.subpkg }}
-        run: |
-          npm pack "./llm-hub-${SUBPKG}"
-          echo "SUBPKG=${SUBPKG}" >> "$GITHUB_ENV"
-
-      - name: Upload tarball artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: subpkg-${{ matrix.subpkg }}
-          path: dist/npm/@ipconfiger/*.tgz
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
           retention-days: 7
 
-  publish-main:
-    name: Publish main + subpackages
-    needs: [build-platform]
+  release:
+    name: Release + Publish
+    needs: build
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-
-      - name: Extract version from tag
-        id: version
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Publishing version ${VERSION}"
-
-      - name: Bump version in all package.json
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          # Use Node to set version in every package.json under dist/npm
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
-            const version = process.argv[1];
-            function walk(dir) {
-              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-                const p = path.join(dir, entry.name);
-                if (entry.isDirectory()) {
-                  walk(p);
-                } else if (entry.name === "package.json") {
-                  const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
-                  pkg.version = version;
-                  if (pkg.optionalDependencies) {
-                    for (const k of Object.keys(pkg.optionalDependencies)) {
-                      pkg.optionalDependencies[k] = version;
-                    }
-                  }
-                  fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n");
-                  console.log("bumped", p);
-                }
-              }
-            }
-            walk("dist/npm");
-          ' "$VERSION"
-
-      - name: Download all subpackage tarballs
+      - name: Download all binary artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: subpkg-*
+          path: assets
           merge-multiple: true
-          path: dist/npm/@ipconfiger
 
-      - name: Publish subpackages
-        working-directory: dist/npm/@ipconfiger
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          for f in *.tgz; do
-            echo "Publishing $f ..."
-            npm publish --access public "$f"
-          done
+      - name: Make unix binaries executable
+        run: chmod +x assets/llm-hub-* || true
 
-      - name: Publish main package
-        working-directory: dist/npm/llm-hub
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
-
-      - name: Create GitHub Release
+      - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/npm/@ipconfiger/*.tgz
+          files: assets/llm-hub-*
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install latest npm
+        run: npm install -g npm@latest
+
+      - name: Set package version from tag
+        working-directory: dist/npm/llm-hub
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version --no-git-tag-version "$VERSION"
+
+      - name: Publish to npm (OIDC trusted publishing)
+        working-directory: dist/npm/llm-hub
+        run: npm publish --access public --provenance
+        continue-on-error: true
+        # First release requires the trusted publisher to be configured on npm.
+        # The GitHub Release + binaries are already created above, so installs
+        # work even if this publish is pending OIDC setup.

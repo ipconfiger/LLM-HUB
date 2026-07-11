@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ipconfiger/LLM-HUB.git"
+    "url": "https://github.com/ipconfiger/LLM-HUB"
   },
   "homepage": "https://github.com/ipconfiger/LLM-HUB",
   "bugs": {
@@ -23,18 +23,13 @@
   "bin": {
     "llm-hub": "bin/cli.js"
   },
-  "files": [
-    "bin/cli.js"
-  ],
-  "optionalDependencies": {
-    "@ipconfiger/llm-hub-darwin-arm64": "0.1.0",
-    "@ipconfiger/llm-hub-darwin-x64": "0.1.0",
-    "@ipconfiger/llm-hub-linux-x64": "0.1.0",
-    "@ipconfiger/llm-hub-linux-x64-gnu": "0.1.0",
-    "@ipconfiger/llm-hub-linux-arm64": "0.1.0",
-    "@ipconfiger/llm-hub-linux-arm64-gnu": "0.1.0",
-    "@ipconfiger/llm-hub-win32-x64": "0.1.0"
+  "scripts": {
+    "postinstall": "node postinstall.js"
   },
+  "files": [
+    "bin/cli.js",
+    "postinstall.js"
+  ],
   "engines": {
     "node": ">=18"
   }

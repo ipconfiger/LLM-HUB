@@ -39,17 +39,18 @@ npm install -g @ipconfiger/llm-hub
 llm-hub --serve
 ```
 
-npm 会**自动只下载当前平台对应的预构建二进制**,装完即可用 `llm-hub` 命令。需要一个 Node.js 18+ 环境。
+安装时 `postinstall` 脚本会自动从 GitHub Releases 下载当前平台对应的预构建二进制。需要一个 Node.js 18+ 环境。
 
 **支持平台:**
 
 | 平台 | 架构 |
 | ---- | ---- |
 | macOS | arm64 (Apple Silicon)、x64 (Intel) |
-| Linux | x64、arm64(musl 静态,适合各类发行版 / 容器) |
+| Linux | x64、arm64(musl 静态默认;设 `LLM_HUB_VARIANT=gnu` 可用 glibc 版) |
 | Windows | x64 |
 
-> 若当前平台没有预构建版,启动器会给出提示,可改用源码编译(见下方"从源码构建")。
+> 需强制重新下载二进制,设 `LLM_HUB_FORCE_DOWNLOAD=1` 再安装。
+> 若当前平台没有预构建版,可改用源码编译(见下方"从源码构建")。
 
 #### 从源码构建(可选)
 
